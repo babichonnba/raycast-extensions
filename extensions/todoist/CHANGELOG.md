@@ -1,5 +1,14 @@
 # Todoist Changelog
 
+## [Daily Planning and Inbox Triage Skill] - 2026-09-24
+
+- Update to Raycast API 2.5.0 for public bundled-skill support.
+- Add a skill for building a realistic daily plan and organizing Inbox tasks with suggested priorities, destinations, and next actions.
+
+## [Fix Menu Bar task actions in background] - 2026-08-27
+
+- Use background-safe HUD notifications for Menu Bar task actions instead of Toast APIs that can crash the command.
+
 ## [Fix menu bar out-of-memory crash] - 2026-07-18
 
 - Fixed the Menu Bar command crashing with "Worker terminated due to reaching memory limit" on larger accounts. Every command previously shared one cache key holding the entire sync state (all tasks, comments, and locations); the menu bar's background worker now uses its own cache key holding only the small slice of data it needs (user, projects, items, labels, collaborators), completing the sync scoping started in #28005.

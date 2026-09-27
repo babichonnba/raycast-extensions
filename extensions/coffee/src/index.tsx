@@ -4,15 +4,24 @@ import {
   LaunchProps,
   LaunchType,
   MenuBarExtra,
+  environment,
   getPreferenceValues,
   launchCommand,
   showHUD,
+  showToast,
+  Toast,
 } from "@raycast/api";
 import { useExec } from "@raycast/utils";
-import { useEffect, useState } from "react";
-import { formatDuration, startCaffeinate, stopCaffeinate, deviceName } from "./utils";
+import { useEffect, useRef, useState } from "react";
+import { formatDuration, startCaffeinate, stopCaffeinate, deviceName, getSchedule } from "./utils";
 import { maybeAutoCaffeinate } from "./status";
-import { CaffeinateStatus, get_caffeinate_state } from "rust:../rust";
+import { get_caffeinate_state } from "rust:../rust";
+
+interface CaffeinateStatus {
+  running: boolean;
+  startTime: number | null;
+  durationSeconds: number | null;
+}
 
 function parseEtime(etime: string): number {
   const parts = etime.split(":").reverse();
@@ -46,6 +55,8 @@ const DURATION_PRESETS: { label: string; seconds: number }[] = [
   { label: "8 Hours", seconds: 8 * 3600 },
   { label: "12 Hours", seconds: 12 * 3600 },
 ];
+
+const HIDE_DECAFFEINATED_DELAY_MS = 5 * 1000;
 
 function useCaffeinateInfo(execute: boolean) {
   if (process.platform === "win32") {
@@ -118,19 +129,26 @@ function useWindowsCaffeinateInfo(execute: boolean) {
   }, [execute]);
 
   const mutate = async (ctx?: Promise<unknown>, options?: MutateOptions) => {
+    const previous = data;
     if (options?.optimisticUpdate) setData(options.optimisticUpdate());
+    let operationError: unknown;
     if (ctx) {
       try {
         await ctx;
-      } catch {
-        // Ignore: the status refresh below reports the actual state.
+      } catch (e) {
+        operationError = e;
       }
+    }
+    if (operationError) {
+      setData(previous);
+      throw operationError;
     }
     try {
       const info = await get_caffeinate_state();
       setData(applyState(info));
     } catch {
-      // Keep the optimistic value.
+      // The operation succeeded but the refresh failed; keep the optimistic
+      // value, which reflects the completed operation, until a later refresh.
     }
   };
 
@@ -143,13 +161,39 @@ export default function Command(props: LaunchProps) {
   const { isLoading, data, mutate } = useCaffeinateInfo(true);
 
   const caffeinateStatus = hasLaunchContext ? props?.launchContext?.caffeinated : data.isRunning;
-  const caffeinateLoader = hasLaunchContext ? false : isLoading;
+  const isEffectiveLoading = hasLaunchContext ? false : isLoading;
   const preferences = getPreferenceValues<Preferences.Index>();
+  const isHideEnabled = Boolean(preferences.hidenWhenDecaffeinated);
 
   const [localCaffeinateStatus, setLocalCaffeinateStatus] = useState<boolean | null>(null);
   const [, setTick] = useState(0);
 
   const displayCaffeinateStatus = localCaffeinateStatus ?? caffeinateStatus;
+
+  const [visibleUntil, setVisibleUntil] = useState(() =>
+    environment.launchType === LaunchType.UserInitiated ? Date.now() + HIDE_DECAFFEINATED_DELAY_MS : 0,
+  );
+
+  const prevStatusRef = useRef(displayCaffeinateStatus);
+  const justDecaffeinated = prevStatusRef.current && !displayCaffeinateStatus;
+  prevStatusRef.current = displayCaffeinateStatus;
+
+  const isGracePeriod = isHideEnabled && (justDecaffeinated || Date.now() < visibleUntil);
+
+  useEffect(() => {
+    if (displayCaffeinateStatus) {
+      setVisibleUntil(0);
+    } else if (justDecaffeinated && isHideEnabled) {
+      setVisibleUntil(Date.now() + HIDE_DECAFFEINATED_DELAY_MS);
+    }
+  }, [displayCaffeinateStatus, justDecaffeinated, isHideEnabled]);
+
+  useEffect(() => {
+    if (!isGracePeriod || !isHideEnabled) return;
+    const remaining = Math.max(0, (visibleUntil || Date.now() + HIDE_DECAFFEINATED_DELAY_MS) - Date.now());
+    const timer = setTimeout(() => setTick((t) => t + 1), remaining);
+    return () => clearTimeout(timer);
+  }, [isGracePeriod, isHideEnabled, visibleUntil]);
 
   useEffect(() => {
     setLocalCaffeinateStatus(null);
@@ -192,32 +236,67 @@ export default function Command(props: LaunchProps) {
   const handleStartFor = async (seconds: number | null, durationLabel: string) => {
     setLocalCaffeinateStatus(true);
     const additionalArgs = seconds === null ? undefined : `-t ${seconds}`;
+    const reason =
+      seconds === null
+        ? undefined
+        : { kind: "for" as const, endsAt: new Date(Date.now() + seconds * 1000).toISOString() };
     const hudMessage =
       seconds === null
         ? `Caffeinating your ${deviceName()} ${durationLabel}`
         : `Caffeinating your ${deviceName()} for ${durationLabel}`;
-    await mutate(startCaffeinate({ menubar: true, status: true }, hudMessage, additionalArgs), {
-      optimisticUpdate: () => ({ isRunning: true, totalSeconds: seconds, startTime: Date.now() }),
-    });
+    try {
+      await mutate(startCaffeinate({ menubar: true, status: true }, hudMessage, additionalArgs, reason), {
+        optimisticUpdate: () => ({ isRunning: true, totalSeconds: seconds, startTime: Date.now() }),
+      });
+    } catch {
+      setLocalCaffeinateStatus(null);
+    }
   };
 
   const handleDeactivate = async () => {
+    const schedule = await getSchedule();
+    if (schedule != undefined && schedule.IsRunning == true && !preferences.decaffeinatePausesSchedules) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Caffeination schedule running",
+        message: "Pause to decaffeinate",
+        primaryAction: {
+          title: "Open Schedules",
+          onAction: () => launchCommand({ name: "addSchedule", type: LaunchType.UserInitiated }),
+        },
+      });
+      return;
+    }
+    try {
+      await mutate(
+        stopCaffeinate({ menubar: true, status: true }, undefined, {
+          pauseRunningSchedule: schedule != undefined && schedule.IsRunning == true,
+        }),
+        { optimisticUpdate: () => ({ isRunning: false, totalSeconds: null, startTime: null }) },
+      );
+    } catch {
+      setLocalCaffeinateStatus(null);
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Failed to decaffeinate",
+        message: "Caffeination may still be running",
+      });
+      return;
+    }
     setLocalCaffeinateStatus(false);
-    await mutate(stopCaffeinate({ menubar: true, status: true }), {
-      optimisticUpdate: () => ({ isRunning: false, totalSeconds: null, startTime: null }),
-    });
-    if (preferences.hidenWhenDecaffeinated) {
+    if (isHideEnabled) {
+      setVisibleUntil(Date.now() + HIDE_DECAFFEINATED_DELAY_MS);
       showHUD(`Your ${deviceName()} is now decaffeinated`);
     }
   };
 
-  if (preferences.hidenWhenDecaffeinated && !displayCaffeinateStatus && !isLoading) {
+  if (isHideEnabled && !displayCaffeinateStatus && !isEffectiveLoading && !isGracePeriod) {
     return null;
   }
 
   return (
     <MenuBarExtra
-      isLoading={caffeinateLoader}
+      isLoading={false}
       icon={
         displayCaffeinateStatus
           ? { source: `${preferences.icon}-filled.svg`, tintColor: Color.PrimaryText }
