@@ -10,6 +10,7 @@ import {
 } from "./servicenow";
 
 const INSTANCE = "acme.service-now.com";
+const INSTANCE_ORIGIN = "https://acme.service-now.com";
 
 describe("padTicketNumber", () => {
   // Regression: a bare "12345" used to build INC12345, which matches no record.
@@ -34,24 +35,29 @@ describe("padTicketNumber", () => {
 });
 
 describe("normalizeInstanceUrl", () => {
-  it("passes a bare host through", () => {
-    expect(normalizeInstanceUrl(INSTANCE)).toBe(INSTANCE);
+  it("defaults a bare host to https", () => {
+    expect(normalizeInstanceUrl(INSTANCE)).toBe(INSTANCE_ORIGIN);
   });
 
-  it("strips protocol, case-insensitively", () => {
-    expect(normalizeInstanceUrl("https://acme.service-now.com")).toBe(INSTANCE);
-    expect(normalizeInstanceUrl("HTTP://acme.service-now.com")).toBe(INSTANCE);
+  // Regression: an explicit http:// was discarded and https was forced back
+  // in, so an HTTP-only instance produced an unreachable link.
+  it("preserves an explicit scheme, case-insensitively", () => {
+    expect(normalizeInstanceUrl("https://acme.service-now.com")).toBe(INSTANCE_ORIGIN);
+    expect(normalizeInstanceUrl("http://acme.service-now.com")).toBe("http://acme.service-now.com");
+    expect(normalizeInstanceUrl("HTTP://acme.service-now.com")).toBe("http://acme.service-now.com");
   });
 
   it("strips surrounding whitespace", () => {
-    expect(normalizeInstanceUrl("  acme.service-now.com  ")).toBe(INSTANCE);
+    expect(normalizeInstanceUrl("  acme.service-now.com  ")).toBe(INSTANCE_ORIGIN);
   });
 
   // Regression: only the protocol and a trailing slash were stripped, so a
   // pasted deep link silently produced a broken URL.
   it("strips a trailing slash and any path or query", () => {
-    expect(normalizeInstanceUrl("acme.service-now.com/")).toBe(INSTANCE);
-    expect(normalizeInstanceUrl("https://acme.service-now.com/nav_to.do?uri=x")).toBe(INSTANCE);
+    expect(normalizeInstanceUrl("acme.service-now.com/")).toBe(INSTANCE_ORIGIN);
+    expect(normalizeInstanceUrl("https://acme.service-now.com/nav_to.do?uri=x")).toBe(
+      INSTANCE_ORIGIN
+    );
   });
 });
 
@@ -81,6 +87,14 @@ describe("buildTicketUrl", () => {
         encodeURIComponent(`${t.table}.do`)
       );
     }
+  });
+
+  // Regression: the instance's http:// scheme was discarded and https was
+  // forced back in, so an HTTP-only instance produced an unreachable link.
+  it("preserves an explicit http scheme instead of forcing https", () => {
+    expect(buildTicketUrl("http://acme.service-now.com", "incident", "INC0012345")).toMatch(
+      /^http:\/\/acme\.service-now\.com\/nav_to\.do/
+    );
   });
 });
 
@@ -140,6 +154,13 @@ describe("filterTicketTypes", () => {
   it("falls back to free-text matching on prefix and name", () => {
     expect(filterTicketTypes("change", null).map((t) => t.prefix)).toEqual(["CHG"]);
     expect(filterTicketTypes("inc", null).map((t) => t.prefix)).toEqual(["INC"]);
+  });
+
+  // Regression: free-text matching compared raw input, so incidental
+  // whitespace (e.g. "request item") lost the match and showed an empty view.
+  it("ignores whitespace in free-text matching", () => {
+    expect(filterTicketTypes("request item", null).map((t) => t.prefix)).toEqual(["RITM"]);
+    expect(filterTicketTypes(" c h g ", null).map((t) => t.prefix)).toEqual(["CHG"]);
   });
 
   // Regression: unmatched input produced an empty list AND no empty view,

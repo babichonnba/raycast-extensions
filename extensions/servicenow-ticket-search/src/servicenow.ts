@@ -30,15 +30,17 @@ export const padTicketNumber = (ticketNumber: string): string =>
   ticketNumber.padStart(TICKET_NUMBER_LENGTH, "0");
 
 /**
- * Reduces whatever the user typed into the preferences field to a bare host.
+ * Reduces whatever the user typed into the preferences field to an origin.
  * Tolerates a pasted full URL ("https://acme.service-now.com/nav_to.do"),
- * stray whitespace, and a trailing slash.
+ * stray whitespace, and a trailing slash. Preserves an explicit "http://"
+ * scheme instead of forcing https, since some instances are HTTP-only;
+ * defaults to https when no scheme is given.
  */
-export const normalizeInstanceUrl = (url: string): string =>
-  url
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .replace(/\/.*$/, "");
+export const normalizeInstanceUrl = (url: string): string => {
+  const trimmedUrl = url.trim();
+  const urlWithProtocol = /^https?:\/\//i.test(trimmedUrl) ? trimmedUrl : `https://${trimmedUrl}`;
+  return new URL(urlWithProtocol).origin;
+};
 
 /**
  * Builds a table-scoped deep link. The nav target is percent-encoded: it
@@ -50,9 +52,9 @@ export const buildTicketUrl = (
   table: string,
   fullTicketNumber: string
 ): string => {
-  const host = normalizeInstanceUrl(instance);
+  const instanceUrl = normalizeInstanceUrl(instance);
   const target = `${table}.do?sysparm_query=number=${fullTicketNumber}`;
-  return `https://${host}/nav_to.do?uri=${encodeURIComponent(target)}`;
+  return `${instanceUrl}/nav_to.do?uri=${encodeURIComponent(target)}`;
 };
 
 export interface ParsedTicket {
@@ -99,8 +101,10 @@ export const filterTicketTypes = (
     return parsed.prefix ? ticketTypes.filter((t) => t.prefix === parsed.prefix) : ticketTypes;
   }
 
-  const query = searchText.toLowerCase();
+  const query = searchText.replace(/\s/g, "").toLowerCase();
   return ticketTypes.filter(
-    (t) => t.prefix.toLowerCase().includes(query) || t.name.toLowerCase().includes(query)
+    (t) =>
+      t.prefix.toLowerCase().includes(query) ||
+      t.name.replace(/\s/g, "").toLowerCase().includes(query)
   );
 };

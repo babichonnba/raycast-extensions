@@ -2,10 +2,6 @@ import { Action, ActionPanel, Color, Icon, List, getPreferenceValues } from "@ra
 import { useState } from "react";
 import { buildTicketUrl, filterTicketTypes, padTicketNumber, parseTicketInput } from "./servicenow";
 
-interface Preferences {
-  snowInstance: string;
-}
-
 /**
  * Presentation only. Kept beside the component rather than in the domain module
  * so that module stays free of @raycast/api and remains testable in plain Node.
